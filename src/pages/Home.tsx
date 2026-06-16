@@ -2,12 +2,14 @@ import { FloatingIsland } from '@/components/FloatingIsland';
 import { Toolbar } from '@/components/Toolbar';
 import { StatusBar } from '@/components/StatusBar';
 import { SettlementModal } from '@/components/SettlementModal';
+import { DailyReportPanel } from '@/components/DailyReportPanel';
 import { useGameLoop } from '@/hooks/useGameLoop';
 import { useGameStore } from '@/store/useGameStore';
 
 export default function Home() {
   useGameLoop();
   const dayTime = useGameStore((state) => state.dayTime);
+  const dailyReports = useGameStore((state) => state.dailyReports);
   const isNight = dayTime >= 50;
 
   return (
@@ -51,8 +53,9 @@ export default function Home() {
             <FloatingIsland />
           </div>
 
-          <div className="order-3 lg:w-56 hidden lg:block">
+          <div className="order-3 lg:w-56 hidden lg:flex lg:flex-col gap-4">
             <GameGuide isNight={isNight} />
+            <DailyReportPanel reports={dailyReports} isNight={isNight} />
           </div>
         </div>
 

@@ -12,11 +12,31 @@ import { calculatePowerNetwork, countPoweredBuildings } from '../utils/powerCalc
 
 const STORAGE_KEY = 'floating-island-grid-game-save';
 
+export interface DailyReport {
+  dayNumber: number;
+  minStoredPower: number;
+  longestBlackout: { x: number; y: number; duration: number } | null;
+  mostFaultyType: string | null;
+  satisfactionChange: number;
+  satisfactionReason: string;
+  attentionArea: string;
+}
+
+interface DailyTracker {
+  minStoredPower: number;
+  houseBlackoutTicks: Record<string, number>;
+  faultCounts: Record<string, number>;
+  startSatisfaction: number;
+}
+
 interface PersistedState {
   grid: GridCell[][];
   dayTime: number;
   storedPower: number;
   satisfaction: number;
+  dayNumber: number;
+  dailyReports: DailyReport[];
+  dailyTracker: DailyTracker;
 }
 
 interface GameState {
@@ -30,6 +50,9 @@ interface GameState {
   totalGeneration: number;
   totalConsumption: number;
   showSettlement: boolean;
+  dayNumber: number;
+  dailyReports: DailyReport[];
+  dailyTracker: DailyTracker;
   setSelectedTool: (tool: ToolType) => void;
   placeOrRemove: (x: number, y: number) => void;
   rotateCell: (x: number, y: number) => void;
@@ -59,6 +82,15 @@ function createEmptyGrid(): GridCell[][] {
   return grid;
 }
 
+function createDailyTracker(satisfaction: number): DailyTracker {
+  return {
+    minStoredPower: Infinity,
+    houseBlackoutTicks: {},
+    faultCounts: {},
+    startSatisfaction: satisfaction,
+  };
+}
+
 function saveToLocalStorage(state: PersistedState): void {
   try {
     const data = JSON.stringify({
@@ -66,6 +98,9 @@ function saveToLocalStorage(state: PersistedState): void {
       dayTime: state.dayTime,
       storedPower: state.storedPower,
       satisfaction: state.satisfaction,
+      dayNumber: state.dayNumber,
+      dailyReports: state.dailyReports,
+      dailyTracker: state.dailyTracker,
     });
     localStorage.setItem(STORAGE_KEY, data);
   } catch {
@@ -79,11 +114,15 @@ function loadFromLocalStorage(): PersistedState | null {
     if (!raw) return null;
     const data = JSON.parse(raw);
     if (data && data.grid && Array.isArray(data.grid)) {
+      const satisfaction = data.satisfaction ?? 50;
       return {
         grid: data.grid,
         dayTime: data.dayTime ?? 20,
         storedPower: data.storedPower ?? 10,
-        satisfaction: data.satisfaction ?? 50,
+        satisfaction,
+        dayNumber: data.dayNumber ?? 1,
+        dailyReports: data.dailyReports ?? [],
+        dailyTracker: data.dailyTracker ?? createDailyTracker(satisfaction),
       };
     }
   } catch {
@@ -112,6 +151,9 @@ function initGame(): Omit<GameState, keyof GameStateActions> {
   const dayTime = saved ? saved.dayTime : 20;
   const storedPower = saved ? saved.storedPower : 10;
   const satisfaction = saved ? saved.satisfaction : 50;
+  const dayNumber = saved ? saved.dayNumber : 1;
+  const dailyReports = saved ? saved.dailyReports : [];
+  const dailyTracker = saved ? saved.dailyTracker : createDailyTracker(satisfaction);
 
   const { newGrid, poweredCells, totalGeneration, totalConsumption, batteryCapacity } =
     recalcGrid(grid, dayTime, storedPower);
@@ -127,6 +169,9 @@ function initGame(): Omit<GameState, keyof GameStateActions> {
     totalGeneration,
     totalConsumption,
     showSettlement: false,
+    dayNumber,
+    dailyReports,
+    dailyTracker,
   };
 }
 
@@ -188,6 +233,9 @@ export const useGameStore = create<GameState>((set, get) => ({
       dayTime: state.dayTime,
       storedPower: state.storedPower,
       satisfaction: state.satisfaction,
+      dayNumber: state.dayNumber,
+      dailyReports: state.dailyReports,
+      dailyTracker: state.dailyTracker,
     });
 
     set(nextState);
@@ -216,6 +264,9 @@ export const useGameStore = create<GameState>((set, get) => ({
       dayTime: state.dayTime,
       storedPower: state.storedPower,
       satisfaction: state.satisfaction,
+      dayNumber: state.dayNumber,
+      dailyReports: state.dailyReports,
+      dailyTracker: state.dailyTracker,
     });
 
     set(nextState);
@@ -244,6 +295,9 @@ export const useGameStore = create<GameState>((set, get) => ({
       dayTime: state.dayTime,
       storedPower: state.storedPower,
       satisfaction: state.satisfaction,
+      dayNumber: state.dayNumber,
+      dailyReports: state.dailyReports,
+      dailyTracker: state.dailyTracker,
     });
 
     set(nextState);
@@ -252,17 +306,24 @@ export const useGameStore = create<GameState>((set, get) => ({
   tick: () => {
     const state = get();
     const newGrid = state.grid.map((row) => row.map((c) => ({ ...c })));
+    const dailyTracker = { ...state.dailyTracker };
+    const newFaultCounts = { ...dailyTracker.faultCounts };
 
     for (let y = 0; y < GRID_SIZE; y++) {
       for (let x = 0; x < GRID_SIZE; x++) {
         const cell = newGrid[y][x];
         if (cell.type !== 'empty' && !cell.faulty && Math.random() < FAULT_CHANCE) {
           newGrid[y][x].faulty = true;
+          newFaultCounts[cell.type] = (newFaultCounts[cell.type] || 0) + 1;
         }
       }
     }
+    dailyTracker.faultCounts = newFaultCounts;
 
+    const wasNight = state.dayTime >= DAY_THRESHOLD;
     const newDayTime = (state.dayTime + 0.5) % DAY_LENGTH;
+    const isDay = newDayTime < DAY_THRESHOLD;
+    const dayStarted = wasNight && isDay;
 
     const { poweredCells, totalGeneration, totalConsumption, batteryCapacity } =
       calculatePowerNetwork(newGrid, newDayTime, state.storedPower);
@@ -275,7 +336,6 @@ export const useGameStore = create<GameState>((set, get) => ({
 
     const netPower = totalGeneration - totalConsumption;
     let newStoredPower = state.storedPower;
-    const isDay = newDayTime < DAY_THRESHOLD;
 
     if (batteryCapacity > 0) {
       if (netPower > 0) {
@@ -286,6 +346,24 @@ export const useGameStore = create<GameState>((set, get) => ({
         newStoredPower = Math.max(0, state.storedPower - discharge);
       }
     }
+
+    if (newStoredPower < dailyTracker.minStoredPower) {
+      dailyTracker.minStoredPower = newStoredPower;
+    }
+
+    const newBlackoutTicks = { ...dailyTracker.houseBlackoutTicks };
+    for (let y = 0; y < GRID_SIZE; y++) {
+      for (let x = 0; x < GRID_SIZE; x++) {
+        const cell = newGrid[y][x];
+        if (cell.type === 'house') {
+          const key = `${x},${y}`;
+          if (!poweredCells.has(key) || cell.faulty) {
+            newBlackoutTicks[key] = (newBlackoutTicks[key] || 0) + 1;
+          }
+        }
+      }
+    }
+    dailyTracker.houseBlackoutTicks = newBlackoutTicks;
 
     const { houses, poweredHouses, factories, poweredFactories } = countPoweredBuildings(
       newGrid,
@@ -304,11 +382,81 @@ export const useGameStore = create<GameState>((set, get) => ({
       newSatisfaction = Math.max(0, state.satisfaction - 0.3);
     }
 
+    let newDayNumber = state.dayNumber;
+    let newDailyReports = state.dailyReports;
+
+    if (dayStarted) {
+      let longestBlackout: { x: number; y: number; duration: number } | null = null;
+      for (const [key, duration] of Object.entries(dailyTracker.houseBlackoutTicks) as [string, number][]) {
+        if (!longestBlackout || duration > longestBlackout.duration) {
+          const [x, y] = key.split(',').map(Number);
+          longestBlackout = { x, y, duration };
+        }
+      }
+
+      let mostFaultyType: string | null = null;
+      let maxFaults = 0;
+      for (const [type, count] of Object.entries(dailyTracker.faultCounts) as [string, number][]) {
+        if (count > maxFaults) {
+          maxFaults = count;
+          mostFaultyType = type;
+        }
+      }
+
+      const satisfactionChange = newSatisfaction - dailyTracker.startSatisfaction;
+      let satisfactionReason = '';
+      if (satisfactionChange > 0) {
+        satisfactionReason = `供电覆盖率${(coverage * 100).toFixed(0)}%，居民满意度提升`;
+      } else if (satisfactionChange < 0) {
+        satisfactionReason = `供电覆盖率仅${(coverage * 100).toFixed(0)}%，居民满意度下降`;
+      } else {
+        satisfactionReason = '供电情况平稳，满意度无明显变化';
+      }
+
+      let attentionArea = '';
+      if (mostFaultyType) {
+        const typeNames: Record<string, string> = {
+          windmill: '风车',
+          house: '住房',
+          factory: '工坊',
+          battery: '蓄电池',
+          wire: '电线',
+        };
+        attentionArea = `${typeNames[mostFaultyType] || mostFaultyType}故障频发（${maxFaults}次），建议加强维护`;
+      } else if (longestBlackout && longestBlackout.duration > 10) {
+        attentionArea = `坐标(${longestBlackout.x},${longestBlackout.y})住房长期断电，建议检查线路`;
+      } else if (dailyTracker.minStoredPower < 5) {
+        attentionArea = '蓄电量偏低，建议增加风车或蓄电池';
+      } else {
+        attentionArea = '电网运行良好，继续保持';
+      }
+
+      const report: DailyReport = {
+        dayNumber: state.dayNumber,
+        minStoredPower: dailyTracker.minStoredPower === Infinity ? state.storedPower : dailyTracker.minStoredPower,
+        longestBlackout,
+        mostFaultyType,
+        satisfactionChange,
+        satisfactionReason,
+        attentionArea,
+      };
+
+      newDailyReports = [report, ...state.dailyReports].slice(0, 7);
+      newDayNumber = state.dayNumber + 1;
+      dailyTracker.minStoredPower = Infinity;
+      dailyTracker.houseBlackoutTicks = {};
+      dailyTracker.faultCounts = {};
+      dailyTracker.startSatisfaction = newSatisfaction;
+    }
+
     saveToLocalStorage({
       grid: newGrid,
       dayTime: newDayTime,
       storedPower: newStoredPower,
       satisfaction: newSatisfaction,
+      dayNumber: newDayNumber,
+      dailyReports: newDailyReports,
+      dailyTracker,
     });
 
     set({
@@ -320,6 +468,8 @@ export const useGameStore = create<GameState>((set, get) => ({
       poweredCells,
       totalGeneration,
       totalConsumption,
+      dayNumber: newDayNumber,
+      dailyReports: newDailyReports,
     });
   },
 
@@ -338,6 +488,9 @@ export const useGameStore = create<GameState>((set, get) => ({
       totalGeneration: result.totalGeneration,
       totalConsumption: result.totalConsumption,
       showSettlement: false,
+      dayNumber: 1,
+      dailyReports: [],
+      dailyTracker: createDailyTracker(50),
     });
   },
 
